@@ -13,6 +13,10 @@ static NSTask *nowPlayingClientHelperTask = nil;
 static NSFileHandle *helperInput = nil;
 static NSFileHandle *helperOutput = nil;
 
+static const NSTimeInterval kHelperSetupTimeout = 3.0;
+static const NSTimeInterval kHelperReadinessTimeout = 3.0;
+static const NSTimeInterval kHelperReadinessPollInterval = 0.05;
+
 void cleanup_helper() {
     if (nowPlayingClientHelperTask && helperInput && helperOutput) {
         @try {
@@ -82,6 +86,22 @@ void cleanup_and_exit() {
 void handleSignal(int signal) {
     if (signal == SIGINT || signal == SIGTERM)
         cleanup_and_exit();
+}
+
+static NSDictionary *waitForAdapterOutput(NSTimeInterval timeout) {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    NSDictionary *result = nil;
+
+    do {
+        result = internal_get(YES);
+        if (result != nil) {
+            return result;
+        }
+
+        [NSThread sleepForTimeInterval:kHelperReadinessPollInterval];
+    } while ([deadline timeIntervalSinceNow] > 0);
+
+    return nil;
 }
 
 extern void adapter_test(void) {
@@ -185,9 +205,9 @@ extern void adapter_test(void) {
           }
         };
         // Wait for setup_done or timeout
-        NSTimeInterval setupTimeout = 3.0;
         dispatch_time_t timeout = dispatch_time(
-            DISPATCH_TIME_NOW, (int64_t)(setupTimeout * NSEC_PER_SEC));
+            DISPATCH_TIME_NOW,
+            (int64_t)(kHelperSetupTimeout * NSEC_PER_SEC));
         long result_wait = dispatch_semaphore_wait(setupSem, timeout);
 
         if (helperOutput.readabilityHandler) {
@@ -196,16 +216,15 @@ extern void adapter_test(void) {
 
         if (result_wait != 0) {
             printErrf(@"The test client did not signal setup_done within %.1fs",
-                      setupTimeout);
+                      kHelperSetupTimeout);
             cleanup_helper();
             exit(3);
         }
 
-        // Small delay to ensure new data is available, for some reason the
-        // first call to adapter_get slows down MediaRemote?
-        [NSThread sleepForTimeInterval:0.01];
-
-        result = internal_get(YES);
+        // setup_done only means the helper has published to
+        // MPNowPlayingInfoCenter. MediaRemote may observe that update shortly
+        // afterwards, so poll for a bounded readiness window.
+        result = waitForAdapterOutput(kHelperReadinessTimeout);
         if (result != nil) {
             cleanup_helper();
             exit(0);
